@@ -189,7 +189,10 @@ if(ROCROLLER_ENABLE_TIMERS)
 endif()
 
 if(ROCROLLER_ENABLE_YAML_CPP)
-    if(ROCROLLER_ENABLE_FETCH)
+    find_package(yaml-cpp 0.8.0 QUIET)
+    if(yaml-cpp_FOUND)
+        message(STATUS "Found yaml-cpp 0.8.0+")
+    elseif(ROCROLLER_ENABLE_FETCH)
         block(SCOPE_FOR VARIABLES PROPAGATE yaml_cpp_SOURCE_DIR)
             # option() honors existing variables
             set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
