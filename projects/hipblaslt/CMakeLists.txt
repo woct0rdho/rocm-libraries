@@ -240,11 +240,13 @@ if(HIPBLASLT_ENABLE_ROCROLLER)
             find_package(rocroller REQUIRED)
         else()
             block(SCOPE_FOR VARIABLES)
-                set(ROCROLLER_ENABLE_FETCH ON)
+                set(ROCROLLER_ENABLE_FETCH ${HIPBLASLT_ENABLE_FETCH})
                 set(ROCROLLER_BUILD_TESTING OFF)
                 set(ROCROLLER_ENABLE_CLIENT OFF)
                 set(BUILD_SHARED_LIBS OFF)
-                option(YAML_CPP_INSTALL "" ON)
+                if(ROCROLLER_ENABLE_FETCH)
+                    option(YAML_CPP_INSTALL "" ON)
+                endif()
                 set(BUILD_TESTING OFF)
                 set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
                 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../shared/rocroller" "${CMAKE_CURRENT_BINARY_DIR}/rocroller")
@@ -641,10 +643,10 @@ if(HIPBLASLT_ENABLE_CLIENT)
         DESTINATION "${CMAKE_INSTALL_BINDIR}"
         COMPONENT benchmarks
     )
-    
+
     # Install all Python modules required by hipblaslt-perf
     rocm_install(
-        FILES 
+        FILES
             "${CMAKE_CURRENT_SOURCE_DIR}/clients/scripts/performance/bench.py"
             "${CMAKE_CURRENT_SOURCE_DIR}/clients/scripts/performance/bench_sample.py"
             "${CMAKE_CURRENT_SOURCE_DIR}/clients/scripts/performance/generator.py"
