@@ -24,6 +24,8 @@
 
 from __future__ import print_function
 
+import pytest
+
 import Tensile.Common as Common
 
 import os
@@ -47,6 +49,36 @@ def test_isGfx12():
     assert Common.isGfx12((12, 5, 0))
     assert not Common.isGfx12((11, 0, 0))
     assert not Common.isGfx12((13, 0, 0))
+
+@pytest.mark.parametrize(
+    ("cached_max", "supports_lgkmcnt_63", "expected", "expect_probe"),
+    (
+        (63, True, 63, True),
+        (63, False, 15, True),
+        (15, True, 15, False),
+    ),
+)
+def test_get_asm_caps_max_lgkmcnt(
+    monkeypatch, cached_max, supports_lgkmcnt_63, expected, expect_probe
+):
+    isa = (11, 5, 1)
+    probes = []
+
+    def fake_try_assembler(_isa, asm_string, _debug=False, *_options):
+        probes.append(asm_string)
+        return asm_string == "" or (
+            supports_lgkmcnt_63 and asm_string == "s_waitcnt lgkmcnt(63)"
+        )
+
+    monkeypatch.setattr(Common, "tryAssembler", fake_try_assembler)
+    monkeypatch.setitem(Common.globalParameters, "AssemblerPath", "amdclang++")
+    monkeypatch.setitem(Common.globalParameters, "IgnoreAsmCapCache", True)
+
+    cache = {isa: {"MaxLgkmcnt": cached_max}}
+    caps = Common.GetAsmCaps(isa, Common.SemanticVersion(7, 15, 0), cache)
+
+    assert caps["MaxLgkmcnt"] == expected
+    assert ("s_waitcnt lgkmcnt(63)" in probes) == expect_probe
 
 def test_paths():
     workingPathName = os.path.join("working", "path")

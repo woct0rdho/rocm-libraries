@@ -2096,8 +2096,12 @@ def GetAsmCaps(isaVersion: IsaVersion, hipVersion: SemanticVersion, cachedAsmCap
     else:
       derivedAsmCaps["MaxVmcnt"] = 0
 
-    # TODO- Need to query the max cap, just like vmcnt as well?
-    derivedAsmCaps["MaxLgkmcnt"] = 15
+    # Assembler acceptance only establishes the field width, not the hardware
+    # counter limit. Verify 63 only for architectures whose cache advertises it.
+    cachedMaxLgkmcnt = cachedAsmCaps[isaVersion]["MaxLgkmcnt"]
+    if cachedMaxLgkmcnt == 63 and not tryAssembler(isaVersion, "s_waitcnt lgkmcnt(63)"):
+      cachedMaxLgkmcnt = 15
+    derivedAsmCaps["MaxLgkmcnt"] = cachedMaxLgkmcnt
 
     derivedAsmCaps["KernargPreloading"] = tryAssembler(isaVersion, """
       TestKernel:
