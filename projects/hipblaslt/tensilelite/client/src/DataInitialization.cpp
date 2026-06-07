@@ -40,10 +40,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstring>
 #include <iostream>
 #include <list>
 #include <map>
 #include <tuple>
+#include <vector>
 
 namespace TensileLite
 {
@@ -2925,6 +2927,84 @@ namespace TensileLite
                 if(ptr == nullptr)
                     std::__throw_runtime_error("error");
             }
+        }
+
+        void DataInitialization::copyTensorALayoutAToGPUBuffer(ContractionProblemGemm const& problem)
+        {
+            auto const tensorIdx = ContractionProblemGemm::TENSOR::A;
+            auto&      desc      = problem.tensors()[tensorIdx];
+            auto       it        = m_vdata[tensorIdx].pristine.find(desc.dataType());
+            if(it == m_vdata[tensorIdx].pristine.end())
+                return;
+
+            auto& p = it->second;
+            if(p.gpuInput.valid.get() == nullptr || p.cpuInput.valid.get() == nullptr)
+                return;
+
+            if(problem.freeIndicesA().size() != 1 || problem.boundIndices().size() != 1)
+                throw std::runtime_error("TensorALayoutA=1 requires one A free index and one bound index");
+
+            size_t nDim = problem.freeIndicesA()[0].i;
+            size_t kDim = problem.boundIndices()[0].a;
+            size_t N    = desc.sizes()[nDim];
+            size_t K    = desc.sizes()[kDim];
+            size_t Kpad = (K + 15) / 16 * 16;
+
+            if(desc.elementBytes() != 1.0f)
+                throw std::runtime_error("TensorALayoutA=1 host pack currently supports byte-sized A only");
+
+            size_t packedPerBatch = Kpad * N;
+            size_t batchCount     = 1;
+            std::vector<size_t> batchDims;
+            for(size_t dim = 0; dim < desc.dimensions(); ++dim)
+            {
+                if(dim == nDim || dim == kDim)
+                    continue;
+                batchDims.push_back(dim);
+                batchCount *= desc.sizes()[dim];
+            }
+
+            size_t packedElements = packedPerBatch * batchCount;
+            if(packedElements > p.maxElements)
+                throw std::runtime_error("TensorALayoutA=1 packed A exceeds allocated buffer");
+
+            std::vector<uint8_t> packed(packedElements, 0);
+            auto const*          src = static_cast<uint8_t const*>(p.cpuInput.valid.get());
+
+            std::vector<size_t> coord(desc.dimensions(), 0);
+            std::vector<size_t> batchCoord(batchDims.size(), 0);
+            for(size_t batch = 0; batch < batchCount; ++batch)
+            {
+                for(size_t d = 0; d < batchDims.size(); ++d)
+                    coord[batchDims[d]] = batchCoord[d];
+
+                size_t batchBase = batch * packedPerBatch;
+                for(size_t k = 0; k < K; ++k)
+                {
+                    coord[kDim] = k;
+                    for(size_t n = 0; n < N; ++n)
+                    {
+                        coord[nDim]       = n;
+                        size_t srcIdx     = desc.index(coord);
+                        size_t dstIdx     = batchBase + (k >> 4) * (N * 16) + n * 16 + (k & 15);
+                        packed[dstIdx]    = src[srcIdx];
+                    }
+                }
+
+                for(size_t d = 0; d < batchDims.size(); ++d)
+                {
+                    size_t idx = batchDims.size() - 1 - d;
+                    batchCoord[idx]++;
+                    if(batchCoord[idx] < desc.sizes()[batchDims[idx]])
+                        break;
+                    batchCoord[idx] = 0;
+                }
+            }
+
+            HIP_CHECK_EXC(hipMemcpy(p.gpuInput.valid.get(),
+                                    packed.data(),
+                                    packed.size(),
+                                    hipMemcpyHostToDevice));
         }
 
         template <typename T>

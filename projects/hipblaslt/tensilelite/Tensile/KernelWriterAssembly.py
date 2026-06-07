@@ -503,6 +503,15 @@ class KernelWriterAssembly(KernelWriter):
                                 localWrite2Coalesced, localWrite2Perpendicular,
                                 [localWriteStrideTile, localWriteStrideUnroll] )
 
+    if (tP["tensorChar"] == "A"
+        and kernel["ProblemType"].get("TensorALayoutA", 0) == 1
+        and tP["glvw"] in (8, 16)
+        and kernel["UnrollMajorLDSA"]):
+      # AK16 stores the full 16-byte K record contiguously only when A is unroll-major in LDS.
+      blockWidth = 2 if tP["glvw"] == 8 else 4
+      localWriteInstructionIdx = next(i for i, inst in enumerate(instructions["LocalWrite"])
+                                      if inst.numBlocks == 1 and inst.blockWidth == blockWidth)
+
     tP["localWrite2Coalesced"]     = localWrite2Coalesced
     tP["localWrite2Perpendicular"] = localWrite2Perpendicular
     tP["localWriteStrideTile"]     = localWriteStrideTile
@@ -582,6 +591,14 @@ class KernelWriterAssembly(KernelWriter):
     tP["localRead2Perpendicular"]  = localRead2Perpendicular
     tP["localReadStrideCoalesced"] = localReadStrideCoalesced
     tP["localReadInstruction"]     = instructions[lrInstPoolName][localReadInstructionIdx]
+
+  def scalarByteGlobalReadUsesScalarG2L(self, tP):
+    return (tP["tensorChar"] in ("A", "B")
+            and tP["glvw"] == 1
+            and tP["bpeGR"] == 1
+            and tP["bpeDS"] == tP["bpeGR"]
+            and tP["globalReadInstruction"].totalWidth == 0.25
+            and tP["localWriteInstruction"].blockWidth == 0.25)
 
   def allocTmpSgpr(self, num: int, alignment=None, tag=None):
     def overflowListener(e):
@@ -843,6 +860,9 @@ class KernelWriterAssembly(KernelWriter):
     needPackK16  = False
     needPackK8Lw = False
     needPackK8Hi = False
+    needB8PermK = kernel["ConvertAfterDS"] and (
+      (kernel["ProblemType"]["DataTypeA"].isAnyBFloat8() and kernel["ProblemType"]["MacDataTypeA"].isHalf()) or
+      (kernel["ProblemType"]["DataTypeB"].isAnyBFloat8() and kernel["ProblemType"]["MacDataTypeB"].isHalf()))
 
     if kernel["ProblemType"]["DataType"].isHalf() or kernel["ProblemType"]["DataType"].isBFloat16():
       if self.states.lrvwTileA > 1 or self.states.lrvwTileB > 1:
@@ -878,6 +898,16 @@ class KernelWriterAssembly(KernelWriter):
       if kernel["StreamK"] != 0 and not needPackK16:
         self.states.nonPostLoopSgpr.append("PackKForV2")
         self.states.nonPostLoopSgpr.append("PackKForV3")
+    if needB8PermK:
+      module.add(self.defineSgpr("B8PermKLo", 1))
+      module.add(self.defineSgpr("B8PermKHi", 1))
+      module.add(self.defineSgpr("B8PermByteLo", 1))
+      module.add(self.defineSgpr("B8PermByteHi", 1))
+      if kernel["StreamK"] != 0:
+        self.states.nonPostLoopSgpr.append("B8PermKLo")
+        self.states.nonPostLoopSgpr.append("B8PermKHi")
+        self.states.nonPostLoopSgpr.append("B8PermByteLo")
+        self.states.nonPostLoopSgpr.append("B8PermByteHi")
 
     if kernel["ProblemType"]["StochasticRounding"] and not self.states.asmCaps["v_prng_b32"]:
       module.add(self.defineSgpr("RNDSeed", 1))
@@ -1842,6 +1872,25 @@ class KernelWriterAssembly(KernelWriter):
             macroArgs.append("sgprOffset%s:req" % idxChars[i])
 
       macro = Macro("GLOBAL_OFFSET_%s" % suffix_tc, ["vgprAddr:req", *macroArgs, "vgprTmp:req"])
+
+      if tc == "A" and kernel["ProblemType"].get("TensorALayoutA", 0) == 1 and justOffset32:
+        nPos = next(i for i, idx in enumerate(indices) if idx == kernel["ProblemType"]["Index0"])
+        kPos = next(i for i, idx in enumerate(indices) if idx == kernel["ProblemType"]["IndexUnroll"])
+        nOffset = "v[\\vgprOffset%s]" % idxChars[nPos]
+        kOffset = "v[\\vgprOffset%s]" % idxChars[kPos]
+        macro.add(VLShiftRightB32(dst=vgpr("Tmp+0", isMacro=True), shiftHex=4, src=kOffset, comment="AK16: kBlock = k >> 4"))
+        macro.add(VMulLOU32(dst=vgpr("Tmp+0", isMacro=True), src0=sgpr("SizeI"), src1=vgpr("Tmp+0", isMacro=True), comment="AK16: kBlock * N"))
+        macro.add(VAddU32(dst=vgpr("Tmp+0", isMacro=True), src0=vgpr("Tmp+0", isMacro=True), src1=nOffset, comment="AK16: + n"))
+        macro.add(VLShiftLeftB32(dst=vgpr("Tmp+0", isMacro=True), shiftHex=4, src=vgpr("Tmp+0", isMacro=True), comment="AK16: * 16"))
+        macro.add(VAndB32(dst=vgpr("Tmp+1", isMacro=True), src0=0xf, src1=kOffset, comment="AK16: k & 15"))
+        macro.add(VAddU32(dst=vgpr("Addr+0", isMacro=True), src0=vgpr("Tmp+0", isMacro=True), src1=vgpr("Tmp+1", isMacro=True), comment="AK16: final A element offset"))
+        if tP != None and kernel["BufferLoad"] and self.states.srdShiftLeft[tc]:
+          macro.add(VAddU32(dst=vgpr("Addr+0", isMacro=True), \
+              src0=hex(self.states.srdShiftLeft[tc]), \
+              src1="v[\\vgprAddr+0]", \
+              comment="add prepad for pointer shift"))
+        module.add(macro)
+        continue
 
       # Each index may be skipped, scaled by stride, or unscaled
       # If destLo is unset, no accumulation is necessary.
@@ -3193,6 +3242,9 @@ class KernelWriterAssembly(KernelWriter):
     needPackK16  = False
     needPackK8Lw = False
     needPackK8Hi = False
+    needB8PermK = kernel["ConvertAfterDS"] and (
+      (kernel["ProblemType"]["DataTypeA"].isAnyBFloat8() and kernel["ProblemType"]["MacDataTypeA"].isHalf()) or
+      (kernel["ProblemType"]["DataTypeB"].isAnyBFloat8() and kernel["ProblemType"]["MacDataTypeB"].isHalf()))
 
     if kernel["ProblemType"]["DataType"].isHalf() or kernel["ProblemType"]["DataType"].isBFloat16():
       if self.states.lrvwTileA > 1 or self.states.lrvwTileB > 1:
@@ -3218,6 +3270,11 @@ class KernelWriterAssembly(KernelWriter):
     if needPackK8Hi:
         module.add(SMovB32(dst=sgpr("PackKFor%sV2"%tPackM), src="0x0c0c0602", comment=""))
         module.add(SMovB32(dst=sgpr("PackKFor%sV3"%tPackM), src="0x0c0c0703", comment=""))
+    if needB8PermK:
+        module.add(SMovB32(dst=sgpr("B8PermKLo"), src="0x010c000c", comment="bf8/e5m2 low pair to fp16"))
+        module.add(SMovB32(dst=sgpr("B8PermKHi"), src="0x030c020c", comment="bf8/e5m2 high pair to fp16"))
+        module.add(SMovB32(dst=sgpr("B8PermByteLo"), src="0x0706000c", comment="bf8/e5m2 byte to low fp16 lane"))
+        module.add(SMovB32(dst=sgpr("B8PermByteHi"), src="0x000c0504", comment="bf8/e5m2 byte to high fp16 lane"))
 
     # self.states.groOffsetInMacroTile == 1 case, subtract pre-pad here
     if self.states.groOffsetInMacroTile and not kernel["UseSubtileImpl"]:
@@ -3497,7 +3554,7 @@ class KernelWriterAssembly(KernelWriter):
         # So don't add the static wg-related component here - save for later.
         module.add(vectorStaticMultiply(vgpr(tmpVgpr), sgpr(tP["wg"]), kernel[tP["mt"]], tmpSgprInfo))  # workgroup
         module.add(VAddCOU32(dst=vgpr(tReg2), dst1=VCC(), src0=vgpr(tmpVgpr), \
-            src1=vgpr(tReg), comment="gro%s-tile = serialTile*VW + (wg%s*MT%s)" \
+            src1=vgpr(tReg), comment="gro%s-tile += wg%s*MT%s" \
             % (tc, tc, tc) ))
         self.vgprPool.checkIn(tmpVgpr)
 
@@ -3880,6 +3937,11 @@ class KernelWriterAssembly(KernelWriter):
     # otherwise, loaded data of A and Metadata will not match
     if margin == -1:
       margin = tP["glvw"] if tP["rtv"] else 1
+      if (tP["tensorChar"] == "A"
+          and kernel["ProblemType"].get("TensorALayoutA", 0) == 1
+          and tP["glvw"] in (4, 8, 16)):
+        # AK16 vectorization is along K inside a 16-byte record, not along public N.
+        margin = 1
     edge = self.vgprPool.checkOut(1, "edge", self.states.preventVgprOverflowDuringNewTile)
 
     with self.allocTmpSgpr(1, tag="graShift_tmpSgprInfo") as tmpSgprInfo:
@@ -5503,6 +5565,14 @@ class KernelWriterAssembly(KernelWriter):
 
     divisorName = tP["lvc"]
     divisor = kernel[divisorName]
+    ak16VectorA = (tc == "A"
+                   and kernel["ProblemType"].get("TensorALayoutA", 0) == 1
+                   and tP["glvw"] in (4, 8, 16)
+                   and tP["tlu"])
+    if ak16VectorA:
+      # AK16's contiguous vector is adjacent K bytes for one N, not adjacent N columns.
+      divisorName = tP["lsc"]
+      divisor = kernel[divisorName]
 
     # DTV case, use tlu path
     isDTVAB = (tc in ("A", "B", "MXSA", "MXSB")) and kernel["DirectToVgpr%s"%tc]
@@ -5680,7 +5750,10 @@ class KernelWriterAssembly(KernelWriter):
 
     with self.allocTmpSgpr(1, tag="lwaTileAssignment_tmpSgprInfo") as tmpSgprInfo:
       if tP["glvw"] > 1:
-        if tP["tlu"]:
+        if ak16VectorA:
+          module.addComment0("AK16: unroll *= glvw")
+          module.add(vectorStaticMultiply(vgpr(uReg), vgpr(uReg), tP["glvw"], tmpSgprInfo))
+        elif tP["tlu"]:
           module.addComment0("tile *= glvw")
           module.add(vectorStaticMultiply(vgpr(tReg), vgpr(tReg), tP["glvw"], tmpSgprInfo))
         else:
@@ -10601,11 +10674,14 @@ class KernelWriterAssembly(KernelWriter):
               loopCnt = sPara + para * sParaEnd + sPerp * paraEnd * sParaEnd  + perp * sPerpEnd * paraEnd * sParaEnd
 
               graIdx = i * self.states.rpgo if kernel["BufferLoad"] else i * self.states.rpga
-              g2lIdx = i * loadWidth * tP["bpeRatio"]
-              if loadWidth == 3:
-                g2lIdx  = i * (loadWidth + 1) * tP["bpeRatio"]
-              if loadWidth == 6:
-                g2lIdx  = i * (loadWidth + 2) * tP["bpeRatio"]
+              if self.scalarByteGlobalReadUsesScalarG2L(tP):
+                g2lIdx = i
+              else:
+                g2lIdx = i * loadWidth * tP["bpeRatio"]
+                if loadWidth == 3:
+                  g2lIdx  = i * (loadWidth + 1) * tP["bpeRatio"]
+                if loadWidth == 6:
+                  g2lIdx  = i * (loadWidth + 2) * tP["bpeRatio"]
               if (tP["isA"] or tP["isB"]) and kernel["DirectToVgpr%s"%tc] and kernel["ConvertAfterDS"] and not isTr:
                 # DTV + ConvertAfterDS case, if bpe > bpeGR, we need to shift g2lIdx for conversion
                 if tP["bpe"] > tP["bpeGR"]:
@@ -11578,11 +11654,14 @@ class KernelWriterAssembly(KernelWriter):
                 i = sPara + (tP["nrcv"]//tP["nrcvpi"]) * (para + tP["nrc"] * (sPerp + tP["nrpv"] * perp))
               loopCnt += 1
               graIdx = i * self.states.rpgo if kernel["BufferLoad"] else i * self.states.rpga
-              g2lIdx = i * loadWidth * tP["bpeRatio"] if loadWidth != 3 else i * (loadWidth + 1) * tP["bpeRatio"]
+              if self.scalarByteGlobalReadUsesScalarG2L(tP):
+                g2lIdx = i
+              else:
+                g2lIdx = i * loadWidth * tP["bpeRatio"] if loadWidth != 3 else i * (loadWidth + 1) * tP["bpeRatio"]
 
-              #TODO: remove this if upcoming compiler changes getting merged
-              if loadWidth == 3:
-                g2lIdx = i * (loadWidth + 1) * tP["bpeRatio"]
+                #TODO: remove this if upcoming compiler changes getting merged
+                if loadWidth == 3:
+                  g2lIdx = i * (loadWidth + 1) * tP["bpeRatio"]
 
               if (tP["isA"] or tP["isB"]) and kernel["DirectToVgpr%s"%tc] and kernel["ConvertAfterDS"]:
                 # DTV + ConvertAfterDS case, if bpe > bpeGR, we need to shift g2lIdx for conversion
@@ -12391,6 +12470,7 @@ class KernelWriterAssembly(KernelWriter):
       g2lIdx = 0
 
       tmpLocalWriteAddr = -1
+      ak16ByteTmp = -1
 
       isAB = tc in ('A', 'B')
 
@@ -12419,6 +12499,39 @@ class KernelWriterAssembly(KernelWriter):
         destVgprPrefix = "G2L%s2"%(tc)
       else:
         destVgprPrefix = "G2L%s"%(tc)
+
+      ak16WideA = (tc == "A"
+                   and kernel["ProblemType"].get("TensorALayoutA", 0) == 1
+                   and tP["glvw"] in (8, 16)
+                   and kernel["UnrollMajorLDSA"])
+      if ak16WideA:
+        localWriteMemToken = [self.states.ldsWriteTokenIdx]
+        if len(localWriteMemToken) == 1:
+          memTokenComment = "sync LDS%u"%(localWriteMemToken[0])
+        else:
+          memTokenComment = "sync LDS %s"%(localWriteMemToken)
+
+        storeWidth = 2 if tP["glvw"] == 8 else 4
+        StoreInst = DSStoreB64 if tP["glvw"] == 8 else DSStoreB128
+        storeComment = "AK16 b64" if tP["glvw"] == 8 else "AK16 b128"
+
+        for perp in range(0, tP["nrp"]):
+          for para in range(0, tP["nrc"]):
+            localWriteCode = imod.add(Module("AK16LocalWriteWide%u perp=%d para=%d"%(instructionCnt, perp, para)))
+            offset, _, comment = self.calculateLdsWriteOffset(perp, para, 0, 0, kernel, tP)
+            srcIdx = (para + tP["nrc"] * perp) * storeWidth
+            addrIdx = offset // 65536
+            olwa = "LocalWriteAddr%s+%u"%(tc, addrIdx)
+            offset -= addrIdx * 65536
+            ds = DSModifiers(na=1, offset=offset)
+            writeInst = StoreInst(dstAddr=vgpr(olwa), src=vgpr(destVgprPrefix + "+%u"%srcIdx, storeWidth), ds=ds,
+                                  comment="%s %s %s"%(storeComment, comment, memTokenComment))
+            writeInst.setMemToken(MemTokenData(localWriteMemToken))
+            if self.do["LocalWrite%s"%tc]:
+              localWriteCode.add(writeInst)
+            instructionCnt += 1
+        return
+
       for perp in range(0, tP["nrp"]):
         localWriteCode = imod.add(Module("LocalWrite%u perp=%d"%(instructionCnt,perp)))
         lwa = "LocalWriteAddr%s"%tc  # default
@@ -12861,36 +12974,64 @@ class KernelWriterAssembly(KernelWriter):
               else:
                 printExit("Unsupported combination DataType%s (%s) -> DataType (%s)"%(tc, kernel["ProblemType"]["DataType%s"%tc].toChar(), kernel["ProblemType"]["MacDataType%s"%tc].toChar()))
 
-            LocalWriteX = tP["localWriteInstruction"].getInst(isHigh16Bits)
             localWriteMemToken = [self.states.ldsWriteTokenIdx]
             if len(localWriteMemToken) == 1:
               memTokenComment = "sync LDS%u"%(localWriteMemToken[0])
             else:
               memTokenComment = "sync LDS %s"%(localWriteMemToken)
             commentWithMemToken = "%s %s"%(comment, memTokenComment)
-            if numBlocks == 1:
+            ak16VectorA = (tc == "A"
+                           and kernel["ProblemType"].get("TensorALayoutA", 0) == 1
+                           and tP["bpeDS"] == 1
+                           and tP["glvw"] == 4
+                           and blockWidth == 1
+                           and numBlocks == 1)
+            if ak16VectorA:
+              writeInst = Module("AK16 vector local write")
+              ldsKStrideBytes = int(kernel[tP["mt"]] * tP["bpeDS"])
+              for byteIdx in range(0, 4):
+                byteOffset = paramList[1] + byteIdx * ldsKStrideBytes
+                addrIdx = byteOffset // 65536
+                olwa = "LocalWriteAddr%s+%u"%(tc, addrIdx)
+                byteOffset -= addrIdx * 65536
+                if byteIdx == 0:
+                  src = paramList[0]
+                else:
+                  if ak16ByteTmp == -1:
+                    ak16ByteTmp = self.vgprPool.checkOut(1, "ak16ByteTmp")
+                  writeInst.add(VLShiftRightB32(dst=vgpr(ak16ByteTmp), shiftHex=hex(8 * byteIdx), src=paramList[0], comment="AK16: select byte %u"%byteIdx))
+                  src = vgpr(ak16ByteTmp)
+                ds = DSModifiers(na=1, offset=byteOffset)
+                storeInst = DSStoreB8(dstAddr=vgpr(olwa), src=src, ds=ds, comment="%s byte %u"%(commentWithMemToken, byteIdx))
+                storeInst.setMemToken(MemTokenData(localWriteMemToken))
+                writeInst.add(storeInst)
+            elif numBlocks == 1:
+              LocalWriteX = tP["localWriteInstruction"].getInst(isHigh16Bits)
               addrIdx = paramList[1] // 65536
               olwa = "LocalWriteAddr%s+%u"%(tc, addrIdx)
               paramList[1] -= addrIdx * 65536
               ds        = DSModifiers(na=1, offset=paramList[1])
               writeInst = LocalWriteX(dstAddr=vgpr(olwa), src=paramList[0], ds=ds, comment=commentWithMemToken)
+              writeInst.setMemToken(MemTokenData(localWriteMemToken))
             else:
+              LocalWriteX = tP["localWriteInstruction"].getInst(isHigh16Bits)
               ds        = DSModifiers(na=2, offset0=paramList[2], offset1=paramList[3])
               writeInst = LocalWriteX(dstAddr=vgpr(lwa), src0=paramList[0], src1=paramList[1], ds=ds, comment=commentWithMemToken)
-            # Attach LDS memory token to local write instructions so downstream
-            # StinkyTofu passes can track local write dependencies.
-            writeInst.setMemToken(MemTokenData(localWriteMemToken))
+              writeInst.setMemToken(MemTokenData(localWriteMemToken))
             if self.do["LocalWriteCVT"]:
               localWriteCode.add(localWriteCVTCode)
             if self.do["LocalWrite%s"%tc]:
               localWriteCode.add(writeInst)
-              instructionCnt += 1 if blockWidth < 8 else 2
+              instructionCnt += 4 if ak16VectorA else (1 if blockWidth < 8 else 2)
 
       if regTmpVgprBlock != None:
         self.vgprPool.checkIn(regTmpVgprBlock)
 
       if tmpLocalWriteAddr != -1:
         self.vgprPool.checkIn(tmpLocalWriteAddr)
+
+      if ak16ByteTmp != -1:
+        self.vgprPool.checkIn(ak16ByteTmp)
 
       #if vgprFp32NanInfFlag != None:
         #self.vgprPool.checkIn(vgprFp32NanInfFlag)
@@ -18923,6 +19064,25 @@ class KernelWriterAssembly(KernelWriter):
       tmpVgpr2 = vgpr(tmp+"+2")
 
     aidx += 1
+
+    if tc == "A" and kernel["ProblemType"].get("TensorALayoutA", 0) == 1 and justOffset32:
+      nPos = next(i for i, idx in enumerate(indices) if idx == kernel["ProblemType"]["Index0"])
+      kPos = next(i for i, idx in enumerate(indices) if idx == kernel["ProblemType"]["IndexUnroll"])
+      nOffset = vgpr(offsets[nPos])
+      kOffset = vgpr(offsets[kPos])
+      module.add(VLShiftRightB32(dst=tmpVgpr0, shiftHex=4, src=kOffset, comment="AK16: kBlock = k >> 4"))
+      module.add(VMulLOU32(dst=tmpVgpr0, src0=sgpr("SizeI"), src1=tmpVgpr0, comment="AK16: kBlock * N"))
+      module.add(VAddU32(dst=tmpVgpr0, src0=tmpVgpr0, src1=nOffset, comment="AK16: + n"))
+      module.add(VLShiftLeftB32(dst=tmpVgpr0, shiftHex=4, src=tmpVgpr0, comment="AK16: * 16"))
+      module.add(VAndB32(dst=tmpVgpr1, src0=0xf, src1=kOffset, comment="AK16: k & 15"))
+      module.add(VAddU32(dst=addrVgpr0, src0=tmpVgpr0, src1=tmpVgpr1, comment="AK16: final A element offset"))
+      if tP != None and kernel["BufferLoad"] and self.states.srdShiftLeft[tc]:
+        module.add(VAddU32(dst=addrVgpr0, \
+            src0=hex(self.states.srdShiftLeft[tc]), \
+            src1=addrVgpr0, \
+            comment="add prepad for pointer shift"))
+      module.addComment1("Global Offset %s (end)"%suffix_tc)
+      return module
 
     # Each index may be skipped, scaled by stride, or unscaled
     # If destLo is unset, no accumulation is necessary.

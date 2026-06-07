@@ -2391,6 +2391,27 @@ class Solution(collections.abc.Mapping):
     # derivation").
 
     bufferLoad = state["BufferLoad"] and state["KernelLanguage"] == "Assembly"
+    if problemType["TensorALayoutA"]:
+      if problemType["TensorALayoutA"] != 1:
+        reject(state, printRejectionReason, "Unsupported TensorALayoutA")
+        return False
+      if not bufferLoad:
+        reject(state, printRejectionReason, "TensorALayoutA requires Assembly BufferLoad")
+        return False
+      if not problemType["TLUA"]:
+        reject(state, printRejectionReason, "TensorALayoutA=1 currently requires TLUA=True")
+        return False
+      if state["GlobalReadVectorWidthA"] not in (1, 4, 8, 16):
+        reject(state, printRejectionReason, "TensorALayoutA=1 currently requires GlobalReadVectorWidthA in (1, 4, 8, 16)")
+        return False
+      if state["DirectToVgprA"] or state["DirectToLdsA"]:
+        reject(state, printRejectionReason, "TensorALayoutA=1 does not support DirectToVgprA/DirectToLdsA yet")
+        return False
+      if len(problemType["IndicesSummation"]) != 1:
+        reject(state, printRejectionReason, "TensorALayoutA=1 currently requires one summation index")
+        return False
+      state["UseSgprForGRO"] = 0
+      state["_UseSgprForGRO"] = 0
     if not bufferLoad:
       state["DirectToLds"] = 0
       state["DirectToLdsA"] = False
@@ -2757,9 +2778,12 @@ class Solution(collections.abc.Mapping):
       if (state["ProblemType"]["DataType"].isHalf() == False) and (state["ProblemType"]["DataType"].isBFloat16() == False):
           reject(state, printRejectionReason, "ConvertAfterDS only support DataType half")
           return
-      if (state["ProblemType"]["DataTypeA"].isAnyFloat8() == False) and (state["ProblemType"]["DataTypeB"].isAnyFloat8() == False) \
+      dataTypeA = state["ProblemType"]["DataTypeA"]
+      dataTypeB = state["ProblemType"]["DataTypeB"]
+      if (dataTypeA.isAnyFloat8() == False) and (dataTypeA.isAnyBFloat8() == False) \
+          and (dataTypeB.isAnyFloat8() == False) and (dataTypeB.isAnyBFloat8() == False) \
           and not (state["ProblemType"]["DataTypeA"].isSingle() and state["ProblemType"]["DataTypeB"].isSingle()):
-          reject(state, printRejectionReason, "one of DataTypeA or DataTypeB need to be float8/float8_fnuz or both are fp32")
+          reject(state, printRejectionReason, "one of DataTypeA or DataTypeB need to be float8/bfloat8/fnuz or both are fp32")
           return
       if state["ProblemType"]["DataType"].isBFloat16() \
           and (state["ProblemType"]["DataTypeA"].isSingle() and state["ProblemType"]["DataTypeB"].isSingle()):
@@ -4178,6 +4202,8 @@ class Solution(collections.abc.Mapping):
             # workaround: disable UseGeneralizedNLCOne for MXBlock (TODO: enable it for MXBlock)
             if state["ProblemType"]["MXBlock%s"%tc]:
               state["UseGeneralizedNLCOne%s"%tc] = False
+            if tc == 'A' and state["ProblemType"]["TensorALayoutA"]:
+              state["UseGeneralizedNLCOne%s"%tc] = False
           else:
             state["UseGeneralizedNLCOne%s"%tc] = False
         state["UseGeneralizedNLCOneMetadata"] = False
@@ -4186,6 +4212,10 @@ class Solution(collections.abc.Mapping):
         state["UseGeneralizedNLCOneA"] = False
         state["UseGeneralizedNLCOneB"] = False
         state["UseGeneralizedNLCOneMetadata"] = False
+
+      if state["ProblemType"]["TensorALayoutA"]:
+        state["UseGeneralizedNLCOneA"] = False
+        state["_UseSgprForGRO"] = 0
 
       ########################################
       # Search DepthU
@@ -6056,8 +6086,8 @@ class Solution(collections.abc.Mapping):
     # Requires preciseBounds check since we rely on the buffer bounds check, not
     # individual vector registers doing bounds compares.
 
-    if state["_UseSgprForGRO"] == 1 and (state["ProblemType"]["SwizzleTensorA"] or state["ProblemType"]["SwizzleTensorB"]):
-      reject(state, printRejectionReason, "UseSgprForGRO for Swizzle is not supported")
+    if state["_UseSgprForGRO"] == 1 and (state["ProblemType"]["SwizzleTensorA"] or state["ProblemType"]["SwizzleTensorB"] or state["ProblemType"]["TensorALayoutA"]):
+      reject(state, printRejectionReason, "UseSgprForGRO for non-affine input layouts is not supported")
 
     if state["_UseSgprForGRO"] == -1:
       # Don't use SGPR if it looks like we might not have enough - better to leave PBC enabled even if we have to use VGPR
@@ -6069,7 +6099,7 @@ class Solution(collections.abc.Mapping):
       numLoadsM = 0
       if state["ProblemType"]["Sparse"] and not state["DirectToVgprSparseMetadata"]:
         numLoadsM = state["NumLoadsCoalescedMetadata"]*state["NumLoadsPerpendicularMetadata"]
-      if (numLoadsA + numLoadsB + numLoadsM + numLoadMXSA + numLoadMXSB  > 35) or state["ProblemType"]["SwizzleTensorA"] or state["ProblemType"]["SwizzleTensorB"]:
+      if (numLoadsA + numLoadsB + numLoadsM + numLoadMXSA + numLoadMXSB  > 35) or state["ProblemType"]["SwizzleTensorA"] or state["ProblemType"]["SwizzleTensorB"] or state["ProblemType"]["TensorALayoutA"]:
         #print "info: Disabling UseSgprForGRO since predicting too many SGPR will be used"
         state["_UseSgprForGRO"] = 0
       else:

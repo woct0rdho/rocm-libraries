@@ -514,6 +514,9 @@ class MasterSolutionLibrary:
                 if problemType.swizzleTensorB:
                     placeholderName += '_STB'
 
+                if getattr(problemType, 'tensorALayoutA', 0) == 1:
+                    placeholderName += '_AK16'
+
                 if problemType.useBias:
                     placeholderName += '_Bias'
                 if problemType.useE:

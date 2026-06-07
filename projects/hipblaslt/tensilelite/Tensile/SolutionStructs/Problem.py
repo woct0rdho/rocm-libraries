@@ -504,6 +504,9 @@ _defaultProblemType = {
     "SupportUserArgs": True,
     "SwizzleTensorA": False,
     "SwizzleTensorB": False,
+    # 0 = normal affine tensor A layout.
+    # 1 = operand-A K16-packed layout: addr(k,n) = (k>>4) * (N*16) + n*16 + (k&15).
+    "TensorALayoutA": 0,
     "isMixMode": False,  # True means this is a mix-mode problem, i.e. Float8BFloat6 or BFloat6Float8
     "MetadataLayout": 0,
     # MX Block
@@ -1319,6 +1322,9 @@ class ProblemType(Mapping):
 
     if self["SwizzleTensorB"]:
       name.append("STB")
+
+    if self["TensorALayoutA"] == 1:
+      name.append("AK16")
 
     # Other
     other = ""
