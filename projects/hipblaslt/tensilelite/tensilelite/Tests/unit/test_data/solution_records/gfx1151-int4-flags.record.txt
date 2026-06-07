@@ -123,6 +123,7 @@ problemType.outputAmaxD=true
 problemType.outputPeerD=true
 problemType.swizzleTensorA=false
 problemType.swizzleTensorB=false
+problemType.tensorALayoutA=0
 problemType.metadataLayout=1
 problemType.mxBlockA=0
 problemType.mxBlockB=0

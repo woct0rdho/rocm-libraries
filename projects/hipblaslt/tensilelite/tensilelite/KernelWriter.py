@@ -1294,6 +1294,12 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
                             and not kernel["UseF32XEmulation"] \
                             and (_nextLoopReadSpansSubTiles(self.states.lrvwTileA, kernel["MIWaveTile"][0]) \
                                  or _nextLoopReadSpansSubTiles(self.states.lrvwTileB, kernel["MIWaveTile"][1]))
+    convertAfterDSA8 = kernel["ConvertAfterDS"] and (
+      kernel["ProblemType"]["DataTypeA"].isAnyFloat8() or kernel["ProblemType"]["DataTypeA"].isAnyBFloat8())
+    convertAfterDSB8 = kernel["ConvertAfterDS"] and (
+      kernel["ProblemType"]["DataTypeB"].isAnyFloat8() or kernel["ProblemType"]["DataTypeB"].isAnyBFloat8())
+    convertAfterDSAB8 = kernel["ConvertAfterDS"] and kernel["ProblemType"]["DataTypeA"].isAnyBFloat8()
+    convertAfterDSBB8 = kernel["ConvertAfterDS"] and kernel["ProblemType"]["DataTypeB"].isAnyBFloat8()
     if (NLLlast and tailloopInNll):
       # use scheduleIterAlg = 0 for NLLlast and tailloopInNll case
       scheduleIterAlg = 0
@@ -1677,14 +1683,18 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
       instPerPackA    = 0 if kernel["UnrollMajorLDSA"] else int(kernel["MIInputPerThreadA"] * kernel["ProblemType"]["MacDataTypeA"].numRegisters() * instPerRegPackA)
       instPerPackB    = 0 if kernel["UnrollMajorLDSB"] else int(kernel["MIInputPerThreadB"] * kernel["ProblemType"]["MacDataTypeB"].numRegisters() * instPerRegPackB)
       if kernel["ConvertAfterDS"]:
-        if kernel["ProblemType"]["DataTypeA"].isAnyFloat8():
+        if convertAfterDSA8:
           if kernel["UnrollMajorLDSA"]:
-            if self.states.asmCaps["Hascvtf16_fp8_sf32"]:
+            if convertAfterDSAB8:
+              instPerPackA = 2 * ceil(tPA["localReadInstruction"].blockWidth) * self.states.numReadsIterCoalescedA if(iteration % self.states.numReadsIterCoalescedA == 0) else 0
+            elif self.states.asmCaps["Hascvtf16_fp8_sf32"]:
               instPerPackA = 2 * self.states.numReadsIterCoalescedA if(iteration % self.states.numReadsIterCoalescedA == 0) else 0
             else:
               instPerPackA = 6 * self.states.numReadsIterCoalescedA if(iteration % self.states.numReadsIterCoalescedA == 0) else 0
           elif self.states.lrvwTileA == 1:
-            if self.states.asmCaps["Hascvtf16_fp8_sf32"]:
+            if convertAfterDSAB8:
+              instPerPackA = 16
+            elif self.states.asmCaps["Hascvtf16_fp8_sf32"]:
               instPerPackA = 4
             else:
               instPerPackA = 8
@@ -1703,14 +1713,18 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
               instPerPackA = 44
             else:
               instPerPackA = 76
-        if kernel["ProblemType"]["DataTypeB"].isAnyFloat8():
+        if convertAfterDSB8:
           if kernel["UnrollMajorLDSB"]:
-            if self.states.asmCaps["Hascvtf16_fp8_sf32"]:
+            if convertAfterDSBB8:
+              instPerPackB = 2 * ceil(tPB["localReadInstruction"].blockWidth) * self.states.numReadsIterCoalescedB if(iteration % self.states.numReadsIterCoalescedB == 0) else 0
+            elif self.states.asmCaps["Hascvtf16_fp8_sf32"]:
               instPerPackB = 2 * self.states.numReadsIterCoalescedB if(iteration % self.states.numReadsIterCoalescedB == 0) else 0
             else:
               instPerPackB = 6 * self.states.numReadsIterCoalescedB if(iteration % self.states.numReadsIterCoalescedB == 0) else 0
           elif self.states.lrvwTileB == 1:
-            if self.states.asmCaps["Hascvtf16_fp8_sf32"]:
+            if convertAfterDSBB8:
+              instPerPackB = 16
+            elif self.states.asmCaps["Hascvtf16_fp8_sf32"]:
               instPerPackB = 4
             else:
               instPerPackB = 8
@@ -1826,7 +1840,7 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
         packPreBItems = packPreB.flatitems()
 
         if packAItems:
-          if kernel["ConvertAfterDS"] and kernel["ProblemType"]["DataTypeA"].isAnyFloat8():
+          if convertAfterDSA8:
             for n in range(instPerPackA):
               packINtemsA[0].append(packAItems.pop(0))
           else:
@@ -1853,7 +1867,7 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
                 break
 
         if packBItems:
-          if kernel["ConvertAfterDS"] and kernel["ProblemType"]["DataTypeB"].isAnyFloat8():
+          if convertAfterDSB8:
             for n in range(instPerPackB):
               packINtemsB[0].append(packBItems.pop(0))
           else:
@@ -1872,7 +1886,7 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
 
         else:
           while packAItems or packMXSAItems:
-            if kernel["ConvertAfterDS"] and kernel["ProblemType"]["DataTypeA"].isAnyFloat8():
+            if convertAfterDSA8:
               for n in range(instPerPackA):
                 if packAItems:
                   packINtemsA[0].append(packAItems.pop(0))
@@ -1901,7 +1915,7 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
                   else:
                     break
           while packMXSBItems or packBItems:
-            if kernel["ConvertAfterDS"] and kernel["ProblemType"]["DataTypeB"].isAnyFloat8():
+            if convertAfterDSB8:
               for n in range(instPerPackB):
                 if packBItems:
                   packINtemsB[0].append(packBItems.pop(0))
@@ -2374,7 +2388,7 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
               waitDsRead = SWaitCnt(dscnt=numDsInsts, comment="Wait for dependent lr")
               iterCode.add(waitDsRead)
         else:
-          if (kernel["UnrollMajorLDSB"] and not (kernel["ProblemType"]["DataTypeB"].isAnyFloat8() and kernel["ConvertAfterDS"])) and not kernel["UseF32XEmulation"]:
+          if (kernel["UnrollMajorLDSB"] and not convertAfterDSB8) and not kernel["UseF32XEmulation"]:
             # Complex products use four MFMAs before advancing B. Negations add
             # scheduler slots, so waiting at index 4 also covers every conjugation.
             secondWaitIndex = 4 if kernel["ProblemType"]["DataType"].isComplex() else kernel["MIWaveTileA"] // kernel["numSubTiles"]
@@ -2948,7 +2962,7 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
               localReads -= self.states.numReadsPerIterMetadata
 
           localReads += localReadsWaitcnt
-          if iteration == 0 and kernel["UnrollMajorLDSB"] and not (kernel["ProblemType"]["DataTypeB"].isAnyFloat8() and kernel["ConvertAfterDS"]):
+          if iteration == 0 and kernel["UnrollMajorLDSB"] and not convertAfterDSB8:
             # We issued LR with A[0]->B[0]->A[1:]->B[1:] order.
             # We need to calculate how many B[N:] needed by 1st mfma.
             # If not UnrollMajorLDSB, we have packB which will be issued ahead.
@@ -8697,7 +8711,9 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
     # groOffsetInMacroTile doesn't work with packed dims since these need to set SRD to the tensor base
     # then extract the packed dimensions from the flattened index (including the workgroup) and scale by strides
     # - the index is per-work-item so can't put work-group into the SRD
-    if len(kernel["PackedC0IndicesX"])==1 and len(kernel["PackedC1IndicesX"])==1 and kernel["BufferLoad"]:
+    if kernel["ProblemType"].get("TensorALayoutA", 0):
+      self.states.groOffsetInMacroTile = 0
+    elif len(kernel["PackedC0IndicesX"])==1 and len(kernel["PackedC1IndicesX"])==1 and kernel["BufferLoad"]:
       self.states.groOffsetInMacroTile = 1
     else:
       self.states.groOffsetInMacroTile = 0
@@ -10431,12 +10447,21 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
       if kernel["PrefetchGL2"]:
         vgprIdx = self.allocGL2PrefetchAddrVgprs(kernel, tensorParametersA, tensorParametersB, vgprIdx)
 
-      # TODO: Serial is always the first/last register in the pool so the store
-      # code doesn't have to deal with fragmentation
-      self.states.startVgprSerial = vgprIdx
-      vgprIdx += 1 # for vgpr serial id
+      # TODO: Serial is usually the last register in the pool so the store code
+      # doesn't have to deal with fragmentation. AK16 can leave a single padding
+      # VGPR before aligned G2L read buffers; use that slot instead of pushing an
+      # otherwise-fitting exact HIP-shaped kernel over the VGPR cap.
+      ak16SerialPadding = (kernel["ProblemType"].get("TensorALayoutA", 0) == 1
+                           and self.states.a.startVgprG2L is not None
+                           and self.states.firstVgprForReads + 1 == self.states.a.startVgprG2L
+                           and self.states.firstVgprForReads >= self.states.lastValuAB)
+      if ak16SerialPadding:
+        self.states.startVgprSerial = self.states.firstVgprForReads
+      else:
+        self.states.startVgprSerial = vgprIdx
+        vgprIdx += 1 # for vgpr serial id
 
-      self.states.totalVgprs = max(vgprIdx, self.states.c.numVgprValu)
+      self.states.totalVgprs = max(vgprIdx, self.states.c.numVgprValu, self.states.startVgprSerial + 1)
       if self.states.totalVgprs < 0 or self.states.totalVgprs > self.states.regCaps["MaxVgpr"]:
         print("warning: total VGPRS (%d) overflowed max VGPRS (%d)." % (self.states.totalVgprs, self.states.regCaps["MaxVgpr"]))
 

@@ -752,6 +752,7 @@ def writeClientConfigIni(forBenchmark, problemSizes, biasTypeArgs, factorDimArgs
         param('device-scalar-alpha', scaleAlphaSupportsDeviceScalar(problemType.useScaleAlphaVec))
         param('swizzle-tensor-a', problemType.swizzleTensorA)
         param('swizzle-tensor-b', problemType.swizzleTensorB)
+        param('tensor-a-layout-a', getattr(problemType, 'tensorALayoutA', 0))
         param('fused-a2a', problemType.fusedA2A)
         if problemType.mxBlockA:
             param('mx-a-block', problemType.mxBlockA)

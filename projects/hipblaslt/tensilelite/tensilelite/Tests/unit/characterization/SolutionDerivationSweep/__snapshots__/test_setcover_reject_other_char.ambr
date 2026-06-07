@@ -40,7 +40,7 @@
     'Valid': False,
     '_GlobalAccumulation': 'MultipleBuffer',
     'rejections': list([
-      'one of DataTypeA or DataTypeB need to be float8/float8_fnuz or both are fp32',
+      'one of DataTypeA or DataTypeB need to be float8/bfloat8/fnuz or both are fp32',
     ]),
   })
 # ---
