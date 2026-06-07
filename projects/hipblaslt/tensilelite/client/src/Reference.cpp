@@ -2726,9 +2726,19 @@ namespace TensileLite
                 return ReferenceSolution<TypedGemm_HF8_H_S_S, float>::SolveCPU(
                     problem, inputs, elementsToValidate);
             }
+            case TypedGemm_HB8_H_S_S::TypeId():
+            {
+                return ReferenceSolution<TypedGemm_HB8_H_S_S, float>::SolveCPU(
+                    problem, inputs, elementsToValidate);
+            }
             case TypedGemm_F8H_H_S_S::TypeId():
             {
                 return ReferenceSolution<TypedGemm_F8H_H_S_S, float>::SolveCPU(
+                    problem, inputs, elementsToValidate);
+            }
+            case TypedGemm_B8H_H_S_S::TypeId():
+            {
+                return ReferenceSolution<TypedGemm_B8H_H_S_S, float>::SolveCPU(
                     problem, inputs, elementsToValidate);
             }
             case TypedGemm_HF8_H_H_S::TypeId():
@@ -2736,9 +2746,19 @@ namespace TensileLite
                 return ReferenceSolution<TypedGemm_HF8_H_H_S, float>::SolveCPU(
                     problem, inputs, elementsToValidate);
             }
+            case TypedGemm_HB8_H_H_S::TypeId():
+            {
+                return ReferenceSolution<TypedGemm_HB8_H_H_S, float>::SolveCPU(
+                    problem, inputs, elementsToValidate);
+            }
             case TypedGemm_F8H_H_H_S::TypeId():
             {
                 return ReferenceSolution<TypedGemm_F8H_H_H_S, float>::SolveCPU(
+                    problem, inputs, elementsToValidate);
+            }
+            case TypedGemm_B8H_H_H_S::TypeId():
+            {
+                return ReferenceSolution<TypedGemm_B8H_H_H_S, float>::SolveCPU(
                     problem, inputs, elementsToValidate);
             }
             case TypedGemm_HF8_H_FP8_S::TypeId():
@@ -2798,9 +2818,19 @@ namespace TensileLite
                 return ReferenceSolution<TypedGemm_HF8N_H_S_S, float>::SolveCPU(
                     problem, inputs, elementsToValidate);
             }
+            case TypedGemm_HB8N_H_S_S::TypeId():
+            {
+                return ReferenceSolution<TypedGemm_HB8N_H_S_S, float>::SolveCPU(
+                    problem, inputs, elementsToValidate);
+            }
             case TypedGemm_F8NH_H_S_S::TypeId():
             {
                 return ReferenceSolution<TypedGemm_F8NH_H_S_S, float>::SolveCPU(
+                    problem, inputs, elementsToValidate);
+            }
+            case TypedGemm_B8NH_H_S_S::TypeId():
+            {
+                return ReferenceSolution<TypedGemm_B8NH_H_S_S, float>::SolveCPU(
                     problem, inputs, elementsToValidate);
             }
             case TypedGemm_HF8N_H_H_S::TypeId():
@@ -2808,9 +2838,19 @@ namespace TensileLite
                 return ReferenceSolution<TypedGemm_HF8N_H_H_S, float>::SolveCPU(
                     problem, inputs, elementsToValidate);
             }
+            case TypedGemm_HB8N_H_H_S::TypeId():
+            {
+                return ReferenceSolution<TypedGemm_HB8N_H_H_S, float>::SolveCPU(
+                    problem, inputs, elementsToValidate);
+            }
             case TypedGemm_F8NH_H_H_S::TypeId():
             {
                 return ReferenceSolution<TypedGemm_F8NH_H_H_S, float>::SolveCPU(
+                    problem, inputs, elementsToValidate);
+            }
+            case TypedGemm_B8NH_H_H_S::TypeId():
+            {
+                return ReferenceSolution<TypedGemm_B8NH_H_H_S, float>::SolveCPU(
                     problem, inputs, elementsToValidate);
             }
             // TODO:; why FP8, not F8... need to change it to FP8N???
