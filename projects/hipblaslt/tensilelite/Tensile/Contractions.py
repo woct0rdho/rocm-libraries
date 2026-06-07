@@ -71,7 +71,7 @@ class ProblemType:
                  'useBeta', 'useBias', 'biasSrcWhiteList', 'useE', 'useGateResidual', 'gateResidualDataTypeWhiteList', 'useScaleAB', 'useScaleCD', 'useScaleAlphaVec', 'biasDataTypeWhiteList',
                  'highPrecisionAccumulate', 'useInitialStridesAB', 'useInitialStridesCD', 'stridedBatched', 'groupedGemm',
                  'useGradient', 'activationType', 'activationArgLength', 'activationComputeDataType', 'activationNoGuard',
-                 'sparse', 'f32XdlMathOp', 'supportDeviceUserArguments', 'outputAmaxD', 'swizzleTensorA', 'swizzleTensorB', 'metadataLayout',
+                 'sparse', 'f32XdlMathOp', 'supportDeviceUserArguments', 'outputAmaxD', 'swizzleTensorA', 'swizzleTensorB', 'tensorALayoutA', 'metadataLayout',
                  'mxBlockA', 'mxBlockB', 'mxTypeA', 'mxTypeB', 'mxScaleFormat', 'fusedGemmA2A']
     @classmethod
     def FromOriginalState(cls, d):
@@ -292,6 +292,7 @@ class ProblemType:
 
         rv.swizzleTensorA = d.get('SwizzleTensorA', False)
         rv.swizzleTensorB = d.get('SwizzleTensorB', False)
+        rv.tensorALayoutA = d.get('TensorALayoutA', 0)
 
         rv.fusedGemmA2A = d.get('FusedGemmA2A', False)
 

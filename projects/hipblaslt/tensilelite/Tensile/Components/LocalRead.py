@@ -162,6 +162,26 @@ class LocalReadMFMA(LocalRead):
             return 0
         return max(1, numElements // lrvwTile)
 
+    @staticmethod
+    def _isB8ToHalfAfterDS(kernel, tc):
+        return (tc in ("A", "B")
+                and kernel["ProblemType"]["DataType%s" % tc].isAnyBFloat8()
+                and kernel["ProblemType"]["MacDataType%s" % tc].isHalf())
+
+    @staticmethod
+    def _emitB8x2ToF16(module, dst, src, comment="convert bf8/e5m2 to f16"):
+        module.add(VPermB32(dst=dst, src0=0, src1=src, src2=sgpr("B8PermKLo"), comment=comment))
+
+    def _emitB8x4ToF16(self, module, dstLo, dstHi, src, comment="convert bf8/e5m2 to f16"):
+        # Emit high output first so in-place dstLo/src aliases do not clobber input bytes.
+        module.add(VPermB32(dst=dstHi, src0=0, src1=src, src2=sgpr("B8PermKHi"), comment=comment + " hi"))
+        self._emitB8x2ToF16(module, dstLo, src, comment + " lo")
+
+    @staticmethod
+    def _emitB8ByteToF16(module, dst, src, high16, comment="convert bf8/e5m2 byte to f16"):
+        selector = "B8PermByteHi" if high16 else "B8PermByteLo"
+        module.add(VPermB32(dst=dst, src0=dst, src1=src, src2=sgpr(selector), comment=comment))
+
     # LDS size is increased on gfx950. const offset is still 16-bit.
     # this function handles both LDS size < 64K and LDS size >= 64K
     def cal_offset_srcAddr(self, maxLDSConstOffset, tc, offset):
@@ -1260,36 +1280,50 @@ class LocalReadMFMA(LocalRead):
                                         highBitsForHalf = False
                                         isHigh16Bits = False
                                         if kernel["UnrollMajorLDS%s"%tc]:
-                                            cvtTimes = int(blockWidth * writer.states.bpr // tP["bpeDS"]) // MIInputPerThUnroll
-                                            for i in range(0, cvtTimes):
-                                                offset = cvtTimes - i - 1
-                                                if writer.states.asmCaps["Hascvtf16_fp8_sf32"]:
-                                                    packCodeT.add(VCvtScalePkFP8toF16(dst=vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+1+offset*2)),\
-                                                                                src=vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+offset)), scale=0x3f800000,\
-                                                                                vop3=VOP3PModifiers(op_sel=[1,0,0,0]), comment="convert fp8 to f16"))
-                                                    packCodeT.add(VCvtScalePkFP8toF16(dst=vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+0+offset*2)),\
-                                                                                src=vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+offset)), scale=0x3f800000,\
-                                                                                vop3=VOP3PModifiers(op_sel=[0,0,0,0]), comment="convert fp8 to f16"))
-                                                elif writer.states.asmCaps["HasCvtFP8toF16"]:
-                                                    packCode.add(VCvtScalePkFP8toF16(dst=vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+1+offset*2)),\
-                                                                                src=vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+offset)),\
-                                                                                vop3=VOP3PModifiers(op_sel=[1,0]),comment="convert F8 to F16"))
-                                                    packCode.add(VCvtScalePkFP8toF16(dst=vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+0+offset*2)),\
-                                                                                src=vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+offset)),\
-                                                                                vop3=VOP3PModifiers(op_sel=[0,0]), comment="convert fp8 to f16"))
-                                                else:
-                                                    packCodeT.add(ECvtPkFP8toF32(dst=vgpr("CvtTemp", 2), src=vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+offset)),\
-                                                                                sel=HighBitSel.HIGH, comment="convert to F32"))
-                                                    packCodeT.add(ECvtF32toF16(dst=vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+1+offset*2)), src=vgpr("CvtTemp+0"),\
-                                                                            sel=HighBitSel.LOW, comment="Convert to FP16"))
-                                                    packCodeT.add(ECvtF32toF16(dst=vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+1+offset*2)), src=vgpr("CvtTemp+1"),\
-                                                                            sel=HighBitSel.HIGH, comment="Convert to FP16"))
-                                                    packCodeT.add(ECvtPkFP8toF32(dst=vgpr("CvtTemp", 2), src=vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+offset)),\
-                                                                                sel=HighBitSel.LOW, comment="convert to F32"))
-                                                    packCodeT.add(ECvtF32toF16(dst=vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+0+offset*2)), src=vgpr("CvtTemp+0"),\
-                                                                            sel=HighBitSel.LOW, comment="Convert to FP16"))
-                                                    packCodeT.add(ECvtF32toF16(dst=vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+0+offset*2)), src=vgpr("CvtTemp+1"),\
-                                                                            sel=HighBitSel.HIGH, comment="Convert to FP16"))
+                                            if self._isB8ToHalfAfterDS(kernel, tc) and blockWidth >= 1:
+                                                # Each LDS source dword holds four B8 values and expands to two packed-f16 VGPRs.
+                                                # Walk backwards so in-place expansion does not clobber unread source dwords.
+                                                for offset in reversed(range(0, numVgpr)):
+                                                    src = vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+offset))
+                                                    dstLo = vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+offset*2))
+                                                    dstHi = vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+1+offset*2))
+                                                    self._emitB8x4ToF16(packCodeT, dstLo, dstHi, src)
+                                            else:
+                                                cvtTimes = int(blockWidth * writer.states.bpr // tP["bpeDS"]) // MIInputPerThUnroll
+                                                for i in range(0, cvtTimes):
+                                                    offset = cvtTimes - i - 1
+                                                    if self._isB8ToHalfAfterDS(kernel, tc):
+                                                        src = vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+offset))
+                                                        dstLo = vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+0+offset*2))
+                                                        dstHi = vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+1+offset*2))
+                                                        self._emitB8x4ToF16(packCodeT, dstLo, dstHi, src)
+                                                    elif writer.states.asmCaps["Hascvtf16_fp8_sf32"]:
+                                                        packCodeT.add(VCvtScalePkFP8toF16(dst=vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+1+offset*2)),\
+                                                                                    src=vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+offset)), scale=0x3f800000,\
+                                                                                    vop3=VOP3PModifiers(op_sel=[1,0,0,0]), comment="convert fp8 to f16"))
+                                                        packCodeT.add(VCvtScalePkFP8toF16(dst=vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+0+offset*2)),\
+                                                                                    src=vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+offset)), scale=0x3f800000,\
+                                                                                    vop3=VOP3PModifiers(op_sel=[0,0,0,0]), comment="convert fp8 to f16"))
+                                                    elif writer.states.asmCaps["HasCvtFP8toF16"]:
+                                                        packCode.add(VCvtScalePkFP8toF16(dst=vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+1+offset*2)),\
+                                                                                    src=vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+offset)),\
+                                                                                    vop3=VOP3PModifiers(op_sel=[1,0]),comment="convert F8 to F16"))
+                                                        packCode.add(VCvtScalePkFP8toF16(dst=vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+0+offset*2)),\
+                                                                                    src=vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+offset)),\
+                                                                                    vop3=VOP3PModifiers(op_sel=[0,0]), comment="convert fp8 to f16"))
+                                                    else:
+                                                        packCodeT.add(ECvtPkFP8toF32(dst=vgpr("CvtTemp", 2), src=vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+offset)),\
+                                                                                    sel=HighBitSel.HIGH, comment="convert to F32"))
+                                                        packCodeT.add(ECvtF32toF16(dst=vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+1+offset*2)), src=vgpr("CvtTemp+0"),\
+                                                                                sel=HighBitSel.LOW, comment="Convert to FP16"))
+                                                        packCodeT.add(ECvtF32toF16(dst=vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+1+offset*2)), src=vgpr("CvtTemp+1"),\
+                                                                                sel=HighBitSel.HIGH, comment="Convert to FP16"))
+                                                        packCodeT.add(ECvtPkFP8toF32(dst=vgpr("CvtTemp", 2), src=vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+offset)),\
+                                                                                    sel=HighBitSel.LOW, comment="convert to F32"))
+                                                        packCodeT.add(ECvtF32toF16(dst=vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+0+offset*2)), src=vgpr("CvtTemp+0"),\
+                                                                                sel=HighBitSel.LOW, comment="Convert to FP16"))
+                                                        packCodeT.add(ECvtF32toF16(dst=vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx+0+offset*2)), src=vgpr("CvtTemp+1"),\
+                                                                                sel=HighBitSel.HIGH, comment="Convert to FP16"))
                                         elif (writer.states.lrvwTileA == 1 and tc == 'A') or (writer.states.lrvwTileB == 1 and tc == 'B'):
                                             destVgpr   = vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, int(valufIdx*2)), numVgpr)
                                             CvtDstVgpr = vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, int(valufIdx*2)), numVgpr)
@@ -1298,7 +1332,9 @@ class LocalReadMFMA(LocalRead):
                                                     destVgpr = vgpr("Valu%s_X%u_I%u_D%u+%u"%(tc, bufferIdx, iui, rIdx%4, valuiIdx), numVgpr)
                                                 else:
                                                     destVgpr = vgpr("Valu%s_X%u_I%u+%u"%(tc, bufferIdx, iui, valuiIdx), numVgpr)
-                                            if writer.states.asmCaps["Hascvtf16_fp8_sf32"]:
+                                            if self._isB8ToHalfAfterDS(kernel, tc):
+                                                self._emitB8ByteToF16(packCodeT, CvtDstVgpr, destVgpr, (rIdx % 2) != 0)
+                                            elif writer.states.asmCaps["Hascvtf16_fp8_sf32"]:
                                                 sel = [0,0,0,0] if (rIdx % 2 == 0)  else [0,0,1,0]
                                                 packCodeT.add(VCvtScaleFP8toF16(dst=CvtDstVgpr, src=destVgpr, scale=0x3f800000, vop3=VOP3PModifiers(op_sel=sel), comment="convert fp8 to f16"))
                                             elif writer.states.asmCaps["HasCvtFP8toF16"]:
@@ -1312,7 +1348,9 @@ class LocalReadMFMA(LocalRead):
                                                 destVgpr = vgpr("Valu%s_X%u_I%u_D%u+%u"%(tc, bufferIdx, iui, rIdx%(MIInputPerThUnroll), vIdx*numVgpr), numVgpr)
                                                 for i in range(0, numVgpr):
                                                     cvtDstVgpr = vgpr("Valu%s_X%u_I%u_D%u+%u"%(tc, bufferIdx, iui, rIdx%(MIInputPerThUnroll), vIdx*numVgpr), numVgpr)
-                                                    if writer.states.asmCaps["Hascvtf16_fp8_sf32"]:
+                                                    if self._isB8ToHalfAfterDS(kernel, tc):
+                                                        self._emitB8x2ToF16(packCodeT, destVgpr, destVgpr)
+                                                    elif writer.states.asmCaps["Hascvtf16_fp8_sf32"]:
                                                         packCodeT.add(VCvtScalePkFP8toF16(dst=destVgpr, src=destVgpr,scale=0x3f800000,vop3=VOP3PModifiers(op_sel=[0,0,0,0]),comment="convert F8 to F16"))
                                                     elif writer.states.asmCaps["HasCvtFP8toF16"]:
                                                         packCode.add(VCvtScalePkFP8toF16(dst=destVgpr, src=destVgpr, vop3=VOP3PModifiers(op_sel=[0]),comment="convert F8 to F16"))
@@ -1338,7 +1376,10 @@ class LocalReadMFMA(LocalRead):
                                                 destVgpr = vgpr("Valu%s_X%u_I%u_D%u+%u"%(tc, bufferIdx, iui, rIdx%(MIInputPerThUnroll), 2 * vIdx * numVgpr), numVgpr)
                                                 cvtDestVgpr = vgpr("Valu%s_X%u_I%u_D%u+%u"%(tc, bufferIdx, iui, rIdx%(MIInputPerThUnroll), 2 * vIdx * numVgpr + 1), numVgpr)
                                                 packCodeT.add(VLShiftRightB32(dst=cvtDestVgpr, shiftHex=16, src=destVgpr, comment="shift 2 element to vgpr+1"))
-                                                if writer.states.asmCaps["Hascvtf16_fp8_sf32"]:
+                                                if self._isB8ToHalfAfterDS(kernel, tc):
+                                                    self._emitB8x2ToF16(packCodeT, cvtDestVgpr, cvtDestVgpr)
+                                                    self._emitB8x2ToF16(packCodeT, destVgpr, destVgpr)
+                                                elif writer.states.asmCaps["Hascvtf16_fp8_sf32"]:
                                                     packCodeT.add(VCvtScalePkFP8toF16(dst=destVgpr, src=destVgpr,scale=0x3f800000, comment="convert F8 to F16"))
                                                     packCodeT.add(VCvtScalePkFP8toF16(dst=cvtDestVgpr, src=cvtDestVgpr,scale=0x3f800000, comment="convert F8 to F16"))
                                                 elif writer.states.asmCaps["HasCvtFP8toF16"]:
@@ -1375,7 +1416,12 @@ class LocalReadMFMA(LocalRead):
 
                                                 packCodeT.add(VMovB32(dst=cvtDestVgpr2, src=cvtDestVgpr1))
                                                 packCodeT.add(VLShiftRightB32(dst=cvtDestVgpr1, shiftHex=16, src=cvtDestVgpr0, comment="shift 2 element to vgpr+1"))
-                                                if writer.states.asmCaps["Hascvtf16_fp8_sf32"]:
+                                                if self._isB8ToHalfAfterDS(kernel, tc):
+                                                    self._emitB8x2ToF16(packCodeT, cvtDestVgpr0, cvtDestVgpr0)
+                                                    self._emitB8x2ToF16(packCodeT, cvtDestVgpr1, cvtDestVgpr1)
+                                                    self._emitB8x2ToF16(packCodeT, cvtDestVgpr2, cvtDestVgpr2)
+                                                    self._emitB8x2ToF16(packCodeT, cvtDestVgpr3, cvtDestVgpr3)
+                                                elif writer.states.asmCaps["Hascvtf16_fp8_sf32"]:
                                                     packCodeT.add(VCvtScalePkFP8toF16(dst=cvtDestVgpr0, src=cvtDestVgpr0,scale=0x3f800000, comment="convert F8 to F16"))
                                                     packCodeT.add(VCvtScalePkFP8toF16(dst=cvtDestVgpr1, src=cvtDestVgpr1,scale=0x3f800000, comment="convert F8 to F16"))
                                                     packCodeT.add(VCvtScalePkFP8toF16(dst=cvtDestVgpr2, src=cvtDestVgpr2,scale=0x3f800000, comment="convert F8 to F16"))

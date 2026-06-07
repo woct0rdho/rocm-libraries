@@ -948,6 +948,19 @@ namespace TensileLite
                         }
                     }
                 }
+                if(m_currentSolution != nullptr
+                   && m_currentSolution->problemType.tensorALayoutA == 1
+                   && m_currentGemmProblem != nullptr
+                   && !m_gpuPtrs.empty())
+                {
+                    copyTensorALayoutAToGPUBuffer(*m_currentGemmProblem);
+                    copyInputs(m_gpuPtrs,
+                               m_gpuBatchPtrs,
+                               m_maxElements,
+                               m_groupedOffsets,
+                               *m_currentGemmProblem,
+                               hipMemcpyDeviceToDevice);
+                }
             }
             virtual void postSolution() override
             {
@@ -1066,6 +1079,8 @@ namespace TensileLite
             void copyValidToGPUBuffer(ContractionProblemGemm const& problem);
 
             void copySwizzledToGPUBuffer(ContractionProblemGemm const& problem);
+
+            void copyTensorALayoutAToGPUBuffer(ContractionProblemGemm const& problem);
 
             void initializeGPUBatchedInputs(ContractionProblemGemm const& problem);
 
