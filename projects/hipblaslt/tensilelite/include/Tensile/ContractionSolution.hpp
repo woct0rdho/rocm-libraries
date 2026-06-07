@@ -1420,6 +1420,7 @@ namespace TensileLite
             bool supportDeviceUserArguments = false;
             bool swizzleTensorA             = false;
             bool swizzleTensorB             = false;
+            int  tensorALayoutA             = 0;
             bool fusedGemmA2A               = false;
             int  metadataLayout             = 0;
             // w4a16 group size, zero-point and encoding come from predicates and the problem;
