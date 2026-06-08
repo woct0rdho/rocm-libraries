@@ -2,8 +2,8 @@ from ..Component import GL2Prefetch
 from ..Common import INDEX_CHARS
 from typing import Mapping
 from rocisa.code import Module
-from rocisa.instruction import SMulI32, SAddU64, VMovB32, VAddU32, VAddCOU32, \
-    VAddCCOU32, VAddNCU64, VLShiftRightB32, VMulLOU32, VMulHIU32, GlobalPrefetchB8, \
+from rocisa.instruction import SMulI32, VMovB32, VAddU32, VAddCOU32, \
+    VAddCCOU32, VLShiftRightB32, VMulLOU32, VMulHIU32, \
     VCmpGtU32, VCndMaskB32, SSubI32, SMovB32, SAddU32, SAddCU32
 from rocisa.container import sgpr, vgpr, RegisterContainer, VCC, GLOBALModifiers, ContinuousRegister
 from rocisa.functions import vectorMultiply64Bpe, scalarMultiplyBpe, vectorStaticDivideAndRemainder, \
@@ -11,9 +11,14 @@ from rocisa.functions import vectorMultiply64Bpe, scalarMultiplyBpe, vectorStati
 from rocisa.enum import TemporalHint, CacheScope
 from math import log2, ceil
 
+try:
+    from rocisa.instruction import GlobalPrefetchB8
+except ImportError:
+    GlobalPrefetchB8 = None
+
 class GL2PrefetchLoad(GL2Prefetch):
     asmCaps = {"HasGlobalPrefetch": True}
-    globalModifiers = GLOBALModifiers(th=TemporalHint.TH_NT, scope=CacheScope.SCOPE_SE)
+    globalModifiers = None
 
     def __call__(self, writer: "KernelWriterAssembly", kernel: Mapping, tp: Mapping):
         pass
@@ -75,6 +80,25 @@ class GL2PrefetchLoad(GL2Prefetch):
 
     def calculateStartAddr(self, writer: "KernelWriterAssembly", kernel: Mapping, tp: Mapping) -> Module:
         mod = Module()
+
+        def sgpr_hi(name):
+            return name + 1 if isinstance(name, int) else f"{name}+1"
+
+        def vgpr_hi(name):
+            return name + 1 if isinstance(name, int) else f"{name}+1"
+
+        def add_s_u64(dst, src0, src1, comment=""):
+            mod.add(SAddU32(sgpr(dst), sgpr(src0), sgpr(src1), comment=comment))
+            mod.add(SAddCU32(sgpr(sgpr_hi(dst)), sgpr(sgpr_hi(src0)), sgpr(sgpr_hi(src1))))
+
+        def add_s_u32_to_u64(dst, src0, src1, comment=""):
+            mod.add(SAddU32(sgpr(dst), sgpr(src0), sgpr(src1), comment=comment))
+            mod.add(SAddCU32(sgpr(sgpr_hi(dst)), sgpr(sgpr_hi(src0)), 0))
+
+        def add_v_s_u64(dst, src0, src1, comment=""):
+            mod.add(VAddCOU32(vgpr(dst), VCC(), vgpr(src0), sgpr(src1), comment=comment))
+            mod.add(VAddCCOU32(vgpr(vgpr_hi(dst)), VCC(), vgpr(vgpr_hi(src0)), sgpr(sgpr_hi(src1)), VCC()))
+
         globalPrefetchSize: int = writer.states.regCaps["GlobalPrefetchSize"]
         tc: str = tp["tensorChar"]
         tIdx: int = tp['idx']
@@ -206,7 +230,7 @@ class GL2PrefetchLoad(GL2Prefetch):
                     sgpr(tmpSgprIdx0), sgpr(tmpSgprIdx1),
                     sgpr(tmpSgprIdx0), perpStride,
                     tmpVgprIdx, comment="*= stride"))
-                mod.add(SAddU64(sgpr(tmpSgprIdx0, 2), sgpr(tmpSgprIdx0, 2), sgpr("Address%s"%tc, 2), comment="base address + MT offset"))
+                add_s_u64(tmpSgprIdx0, tmpSgprIdx0, f"Address{tc}", comment="base address + MT offset")
                 
             # strided batch offset
             if kernel["ProblemType"]["Batched"]:
@@ -222,7 +246,7 @@ class GL2PrefetchLoad(GL2Prefetch):
                         sgpr(tmpSgprIdx2), sgpr(tmpSgprIdx3),
                         sgpr("WorkGroup2"), sgpr(tmpSgprIdx2),
                         tmpVgprIdx, comment="batch offset * wg2"))
-                    mod.add(SAddU64(sgpr(tmpSgprIdx0, 2), sgpr(tmpSgprIdx0, 2), sgpr(tmpSgprIdx2, 2)))
+                    add_s_u64(tmpSgprIdx0, tmpSgprIdx0, tmpSgprIdx2)
             # skip PGR loads (uses GSU-adjusted increment)
             if kernel["PrefetchGlobalRead"] > 0:
                 if kernel["PrefetchGlobalRead"] > 1:
@@ -230,18 +254,14 @@ class GL2PrefetchLoad(GL2Prefetch):
                         sgpr(tmpSgprIdx2), sgpr(tmpSgprIdx3),
                         sgpr(f"GL2PrefetchInc{tc}"), kernel["PrefetchGlobalRead"],
                         tmpVgprIdx, comment="*= PGR"))
-                    mod.add(SAddU64(sgpr(tmpSgprIdx0, 2), sgpr(tmpSgprIdx0, 2), sgpr(tmpSgprIdx2, 2), \
-                        comment="skip PGR loads"))
+                    add_s_u64(tmpSgprIdx0, tmpSgprIdx0, tmpSgprIdx2, comment="skip PGR loads")
                 else:
-                    mod.add(SAddU32(sgpr(tmpSgprIdx0), sgpr(tmpSgprIdx0), sgpr(f"GL2PrefetchInc{tc}"), \
-                        comment="skip PGR loads"))
-                    mod.add(SAddCU32(sgpr(tmpSgprIdx1), sgpr(tmpSgprIdx1), 0, \
-                        comment="skip PGR loads"))
+                    add_s_u32_to_u64(tmpSgprIdx0, tmpSgprIdx0, f"GL2PrefetchInc{tc}", comment="skip PGR loads")
 
             # add all together
             for i in range(tp["gl2nl"]):
                 dst = f"{vgprAddrBaseName}_{i}"
-                mod.add(VAddNCU64(vgpr(dst, 2), vgpr(dst, 2), sgpr(tmpSgprIdx0, 2)))
+                add_v_s_u64(dst, dst, tmpSgprIdx0)
 
         writer.vgprPool.checkIn(tmpVgprIdx)
         writer.vgprPool.checkIn(tmpVgprCoalIdx)
@@ -249,20 +269,25 @@ class GL2PrefetchLoad(GL2Prefetch):
 
     def issueLoad(self, writer: "KernelWriterAssembly", kernel: Mapping, tp: Mapping) -> Module:
         mod = Module()
+        if GlobalPrefetchB8 is None:
+            raise RuntimeError("PrefetchGL2 requires a rocisa binding with GlobalPrefetchB8")
+        try:
+            globalModifiers = GLOBALModifiers(th=TemporalHint.TH_NT, scope=CacheScope.SCOPE_SE)
+        except TypeError:
+            globalModifiers = GLOBALModifiers()
         tc: str = tp["tensorChar"]
         for i in range(tp["gl2nl"]):
             addrName = f"GL2PrefetchAddr{tc}_{i}"
-            mod.add(GlobalPrefetchB8(vgpr(addrName, 2), sgpr("off", isOff=True), self.globalModifiers))
+            mod.add(GlobalPrefetchB8(vgpr(addrName, 2), sgpr("off", isOff=True), globalModifiers))
         return mod
 
     def incrementAddr(self, writer: "KernelWriterAssembly", kernel: Mapping, tp: Mapping) -> Module:
         mod = Module()
         tc: str = tp["tensorChar"]
-        inc = sgpr(f"GL2PrefetchInc{tc}")
+        inc = f"GL2PrefetchInc{tc}"
         for i in range(tp["gl2nl"]):
             addrName = f"GL2PrefetchAddr{tc}_{i}"
-            addrNameHi = addrName + "+1"
-            mod.add(VAddCOU32(vgpr(addrName), VCC(), vgpr(addrName), inc))
-            mod.add(VAddCCOU32(vgpr(addrNameHi), VCC(), vgpr(addrNameHi), 0, VCC()))
+            mod.add(VAddCOU32(vgpr(addrName), VCC(), vgpr(addrName), sgpr(inc)))
+            mod.add(VAddCCOU32(vgpr(f"{addrName}+1"), VCC(), vgpr(f"{addrName}+1"), 0, VCC()))
 
         return mod
