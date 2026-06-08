@@ -328,6 +328,9 @@ class KernelWriterConversion(KernelWriterBase):
       kStr += " ))" + self.endLine
 
     self.num_dword_load = int(self.num_elements_load * self.state["ProblemType"]["ComputeDataType"].numBytes() / 4)
+    loadSubDword = self.num_dword_load == 0
+    if loadSubDword:
+      self.num_dword_load = self.num_elements_load
     self.num_dword_store = int(self.num_elements_load * self.state["ProblemType"]["DestDataType"].numBytes() / 4)
     if self.num_dword_store == 0:
       self.num_dword_store = self.num_elements_load * self.state["ProblemType"]["DestDataType"].numBytes() / 4
@@ -570,7 +573,7 @@ class KernelWriterConversion(KernelWriterBase):
       loadTypeStr = "%s%s" % (self.datatype, "" if self.num_dword_load == 1 else self.num_dword_load)
       storeTypeStr = "%s%s" % (self.datatype, "" if self.num_dword_store == 1 else self.num_dword_store)
     else:
-      loadTypeStr = "%s%s" % (typeStr, "" if self.num_dword_load == 1 else self.num_dword_load)
+      loadTypeStr = self.datatype if loadSubDword else "%s%s" % (typeStr, "" if self.num_dword_load == 1 else self.num_dword_load)
       storeTypeStr = "%s%s" % (typeStr, self.num_dword_store) if self.num_dword_store >= 1 else typeStr2 if self.num_dword_store == 0.5 else destTypeStr
 
     #Bias A/B

@@ -9123,14 +9123,18 @@ class KernelWriter(metaclass=abc.ABCMeta):
       self.states.startVgprAddressDbg = vgprIdx
       vgprIdx += numVgprAddressDbg
 
-      # for cgemm or zgemm + MIAV case, allocate 2 or 4 vgpr for alpha calculation (cannot use tmp vgpr in write batch)
-      if kernel["ProblemType"]["DataType"].isComplex() \
-        and kernel["MIArchVgpr"]:
-
-        # need proper alignment
-        vgprIdx = ((vgprIdx+2 - 1)//2)*2
-        self.states.startVgprAlphaTmp = vgprIdx
-        vgprIdx += kernel["ProblemType"]["DataType"].numRegisters()
+      # Allocate persistent VGPRs for MIAV alpha calculation; tmp VGPRs cannot
+      # be used inside serialized write batches.
+      if kernel["MIArchVgpr"]:
+        if kernel["ProblemType"]["DataType"].isComplex():
+          # need proper alignment
+          vgprIdx = ((vgprIdx+2 - 1)//2)*2
+          self.states.startVgprAlphaTmp = vgprIdx
+          vgprIdx += kernel["ProblemType"]["DataType"].numRegisters()
+        elif kernel["ProblemType"]["ComputeDataType"].isHalf() \
+          and not kernel["ProblemType"]["HighPrecisionAccumulate"]:
+          self.states.startVgprAlphaTmp = vgprIdx
+          vgprIdx += 1
 
       # for swapping vgpr offsets of different lds buffers
       if self.states.a.numVgprLocalReadSwapAddr > 0:

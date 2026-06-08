@@ -23,8 +23,8 @@
 from rocisa.code import Label, Module
 from rocisa.container import vgpr, sgpr, accvgpr, Holder, MemTokenData
 from rocisa.instruction import SBarrier, SBranch, SMovB32, SMovB64, SWaitCnt, SWaitTensorcnt,\
-  VAccvgprReadB32, VAccvgprWriteB32, VFmaF32, VFmaF64, VLShiftLeftB64, VMovB32, \
-  VMovRelsD2B32, VMulF32, VMulF64, VMulLOU32, VMulPKF16
+  VAccvgprReadB32, VAccvgprWriteB32, VCvtF32toF16, VFmaF32, VFmaF64, VLShiftLeftB64, VMovB32, \
+  VMovRelsD2B32, VMulF32, VMulF64, VMulLOU32, VMulPKF16, VPackF16toB32
 from rocisa.functions import BranchIfNotZero
 
 from Tensile.Common.DataType import DataType
@@ -325,9 +325,21 @@ def mulMIoutAlphaToArch(kernel, startVgprAlphaTmp):
                                                     src0=sgpr("Alpha"), src1=vgpr("ValuC+%u"%srcIdx),
                                                     comment="Multiply MI out reg with alpha")
     elif (kernel["ProblemType"]["ComputeDataType"].isHalf() and not kernel["ProblemType"]["HighPrecisionAccumulate"]):
-      itemList[destIdx] = VMulPKF16(dst=vgpr(Holder(name="ValuC")),
-                                                       src0=sgpr("Alpha"),
-                                                       src1=vgpr("ValuC+%u"%srcIdx), comment="Multiply MI out reg with alpha")
+      if kernel.get("EnableMatrixInstruction") and kernel.get("MIArchVgpr"):
+        packedAlphaVgpr = startVgprAlphaTmp
+        hhhMul = Module()
+        if i == 0:
+          hhhMul.add(VMovB32(dst=vgpr(packedAlphaVgpr), src=sgpr("Alpha"), comment="copy alpha for packed half multiply"))
+          hhhMul.add(VCvtF32toF16(dst=vgpr(packedAlphaVgpr), src=vgpr(packedAlphaVgpr), comment="convert alpha to half"))
+          hhhMul.add(VPackF16toB32(dst=vgpr(packedAlphaVgpr), src0=vgpr(packedAlphaVgpr), src1=vgpr(packedAlphaVgpr), comment="replicate alpha half for packed multiply"))
+        hhhMul.add(VMulPKF16(dst=vgpr(Holder(name="ValuC")),
+                                                        src0=vgpr(packedAlphaVgpr),
+                                                        src1=vgpr("ValuC+%u"%srcIdx), comment="Multiply MI out reg with alpha"))
+        itemList[destIdx] = hhhMul
+      else:
+        itemList[destIdx] = VMulPKF16(dst=vgpr(Holder(name="ValuC")),
+                                                         src0=sgpr("Alpha"),
+                                                         src1=vgpr("ValuC+%u"%srcIdx), comment="Multiply MI out reg with alpha")
     elif kernel["ProblemType"]["ComputeDataType"].isInt32():
       itemList[destIdx] = VMulLOU32(dst=vgpr(Holder(name="ValuC")),
                                                       src0=sgpr("Alpha"), src1=vgpr("ValuC+%u"%srcIdx),
