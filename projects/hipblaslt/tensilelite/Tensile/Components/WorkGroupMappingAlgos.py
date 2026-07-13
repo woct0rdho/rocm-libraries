@@ -319,9 +319,34 @@ def DefaultWGM(writer, kernel, sgprWGM):
 
     wgmLabel         = Label(label=writer.labels.getNameInc("WGM"), comment="")
     wgmLabelPositive = Label(label=writer.labels.getNameInc("WGMPositive"), comment="")
+    wgmStaticFallbackLabel = Label(label=writer.labels.getNameInc("WGMStaticFallback"), comment="")
 
     if clusterEnabled(kernel["ClusterDim"]):
       module.add(SBranch(wgmLabel.getLabelName()))
+
+    # Limit the scalar fast path to the validated rocBLAS-like WGM8 case.
+    staticPositiveWgm = kernel["WorkGroupMapping"] if kernel["WorkGroupMapping"] == 8 else 0
+    if staticPositiveWgm:
+      with writer.allocTmpSgprList(nums=[1, 1, 1]) as tmpSgprInfoList:
+        blockId2 = tmpSgprInfoList[0].idx
+        wgSerial2 = tmpSgprInfoList[1].idx
+        mappedWg0 = tmpSgprInfoList[2].idx
+        module.add(SCmpEQU32(src0=sgpr(tmpWGM), src1=staticPositiveWgm, comment="use static WGM fast path?"))
+        module.add(SCBranchSCC0(labelName=wgmStaticFallbackLabel.getLabelName()))
+        module.add(SAndB32(dst=sgpr(wgSerial2), src0=sgpr("NumWorkGroups1"), src1=staticPositiveWgm - 1, comment="nwg1 % WGM"))
+        module.add(SCmpEQU32(src0=sgpr(wgSerial2), src1=0, comment="nwg1 divisible by WGM?"))
+        module.add(SCBranchSCC0(labelName=wgmStaticFallbackLabel.getLabelName()))
+        module.add(scalarStaticDivideAndRemainder(qReg=blockId2, rReg=wgSerial2, dReg="WorkGroup1",
+                                                  divisor=staticPositiveWgm, tmpSgprRes=None))
+        module.add(SMulI32(dst=sgpr(wgSerial2), src0=sgpr(wgSerial2), src1=sgpr("NumWorkGroups0"), comment="(wg1 % WGM)*nwg0"))
+        module.add(SAddU32(dst=sgpr(wgSerial2), src0=sgpr(wgSerial2), src1=sgpr("WorkGroup0"), comment="wgSerial = wg0 + (wg1 % WGM)*nwg0"))
+        module.add(scalarStaticDivideAndRemainder(qReg=mappedWg0, rReg="WorkGroup1", dReg=wgSerial2,
+                                                  divisor=staticPositiveWgm, tmpSgprRes=None))
+        module.add(SMovB32(dst=sgpr("WorkGroup0"), src=sgpr(mappedWg0), comment="static WGM quotient"))
+        module.add(SMulI32(dst=sgpr(blockId2), src0=sgpr(blockId2), src1=staticPositiveWgm, comment="blockId * WGM"))
+        module.add(SAddU32(dst=sgpr("WorkGroup1"), src0=sgpr("WorkGroup1"), src1=sgpr(blockId2), comment="wg1 += blockId * WGM"))
+        module.add(SBranch(wgmLabel.getLabelName()))
+        module.add(wgmStaticFallbackLabel)
 
     module.add(SCmpGtI32(src0=sgpr(tmpWGM), src1=1, comment="WGM > 1 ?"))
     module.add(SCBranchSCC1(labelName=wgmLabelPositive.getLabelName(), comment="branch if WGM > 1"))
