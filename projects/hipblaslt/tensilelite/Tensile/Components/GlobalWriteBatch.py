@@ -1131,7 +1131,7 @@ class GlobalWriteBatchWriter:
           self.loadsBetaIssued += ceil(self.kernel["ProblemType"]["DestDataType"].numBytes() * self.gwvw / 16)
       self.betaLoadIssued.append(len(self.loadedDataBeta) * ceil(self.kernel["ProblemType"]["DestDataType"].numBytes() * self.ss.cfg.gwvw / 16))
 
-      if (self.kernel["ProblemType"]["UseE"] and self.kernel["ProblemType"]["Gradient"] and self.kernel["ProblemType"]["ActivationType"] != 'none') and ((self.kernel["GlobalSplitU"] == 1 or self.kernel["GlobalSplitU"] == -1) or self.kernel["StreamK"] > 0):
+      if self.ss.useE and self.kernel["ProblemType"]["Gradient"] and self.kernel["ProblemType"]["ActivationType"] != 'none':
         tmpInrSgpr = self._epilogScratchSgpr(1)
         module.add(addrCalc.emitLdChange(self.kernel, self.ss, 'E', self.edge, self.beta, mask, bufferOOB, (elementIdx == 0), self.tmpVgpr, tmpInrSgpr, addrEVgpr, self.addrE, 0))
         self._epilogScratchFree(tmpInrSgpr)
@@ -1154,7 +1154,7 @@ class GlobalWriteBatchWriter:
                                    loadInputCode, factor_gwvw,
                                    False)
       tmpInrSgpr = self._epilogScratchSgpr(1)
-      if (self.kernel["ProblemType"]["UseE"] and not self.kernel["ProblemType"]["Gradient"]) and ((self.kernel["GlobalSplitU"] == 1 or self.kernel["GlobalSplitU"] == -1) or self.kernel["StreamK"] > 0):
+      if self.ss.useE and not self.kernel["ProblemType"]["Gradient"]:
         module.add(addrCalc.emitLdChange(self.kernel, self.ss, 'E', self.edge, self.beta, mask, bufferOOB, (elementIdx == len(self.batchElements) - 1), self.tmpVgpr, tmpInrSgpr, addrEVgpr, self.addrE, 0))
       if self.storeBiasD == 1:
         module.add(addrCalc.emitLdChange(self.kernel, self.ss, 'Bias', self.edge, self.beta, mask, bufferOOB, (elementIdx == len(self.batchElements) - 1), self.tmpVgpr, tmpInrSgpr, addrBiasVgpr, self.addrBias, self.factorDim))
@@ -1300,7 +1300,7 @@ class GlobalWriteBatchWriter:
       if self.kernel["_GlobalAccumulation"] == "MultipleBufferSingleKernel":
         if self.ss.optSrdIncForRow and (addrCalc.rowInc or (self.kernel["CompactLoopStore"] and elementIdx == 0 and self.batchIdx == 0)) and self.kernel["StoreRemapVectorWidth"] > 0:
           module.addComment1("StoreRemap: shift coord1 address MultipleBufferSingleKernel")
-          if self.kernel["ProblemType"]["UseE"] and (self.kernel["GlobalSplitU"] == 1 or self.kernel["GlobalSplitU"] == -1):
+          if self.ss.useE:
             # TODO Check if works with StreamK
             printExit("Use E does not support StoreRemapVectorWidth if GSU == 1.")
             # module.add(addrCalc.incrementToNextRow(self.kernel, "E", self.ss, self.tmpS01, isCompute=True))
@@ -1373,7 +1373,7 @@ class GlobalWriteBatchWriter:
           storeCodeGSUSK.add(vectorStaticMultiply(vgpr(addrDVgpr), vgpr("Serial"), storeWidth * self.parentWriter.states.bpeCinternal, ContinuousRegister(self.tmpS01, 1)))
           storeCodeGSUSK.add(SMovB32(dst=sgpr(self.tmpS01), src=0, comment="Init sgpr offset"))
           storeCodeGSUSK.addSpaceLine()
-        if (self.kernel["ProblemType"]["UseE"] and not self.kernel["ProblemType"]["Gradient"]) and ((self.kernel["GlobalSplitU"] == 1 or self.kernel["GlobalSplitU"] == -1) or self.kernel["StreamK"] > 0):
+        if self.ss.useE and not self.kernel["ProblemType"]["Gradient"]:
           vgprIdx = self.ss.elementSumIdx[elementIdx] - self.parentWriter.states.c.startVgprValu
           vgprDst = self.activationSetPCStruct.vgprActCopy if mergeActFuncCall else "ValuC+%d"%vgprIdx
           module.add(self.parentWriter.addStore(self.kernel, self.ss, 'E', addrCalc, vgprDst, self.tmpS01, self.edge, comment="store E"))
@@ -1844,7 +1844,7 @@ class GlobalWriteBatchWriter:
       if self.kernel["_GlobalAccumulation"] != "MultipleBufferSingleKernel":
         if self.ss.optSrdIncForRow and (addrCalc.rowInc or (self.kernel["CompactLoopStore"] and elementIdx == 0 and self.batchIdx == 0)) and self.kernel["StoreRemapVectorWidth"] > 0:
           module.addComment1("StoreRemap: shift coord1 address")
-          if self.kernel["ProblemType"]["UseE"] and (self.kernel["GlobalSplitU"] == 1 or self.kernel["GlobalSplitU"] == -1):
+          if self.ss.useE:
             # TODO Check if works with StreamK
             printExit("Use E does not support StoreRemapVectorWidth if GSU == 1.")
             # module.add(addrCalc.incrementToNextRow(self.kernel, "E", self.ss, self.tmpS01, isCompute=True))
@@ -1965,7 +1965,7 @@ class GlobalWriteBatchWriter:
       if self.parentWriter.states.useBias == DataDirection.READ:
         if activationCDataType == self.kernel["ProblemType"]["ComputeDataType"] and self.kernel["ActivationFuncCall"]:
           mergeActFuncCall = True
-        if (self.kernel["ProblemType"]["Gradient"] and self.kernel["ProblemType"]["ActivationType"] != 'none' and self.kernel["ProblemType"]["UseE"]) and ((self.kernel["GlobalSplitU"] == 1 or self.kernel["GlobalSplitU"] == -1) or self.kernel["StreamK"] > 0):
+        if self.kernel["ProblemType"]["Gradient"] and self.kernel["ProblemType"]["ActivationType"] != 'none' and self.ss.useE:
           mergeActFuncCall = False
 
         if self.factorDim and self.gwvw > 1:
@@ -2044,7 +2044,7 @@ class GlobalWriteBatchWriter:
         else:
           gateModule.add(_emit_gate_fma())
 
-      if (self.kernel["ProblemType"]["UseE"] and not self.kernel["ProblemType"]["Gradient"]) and ((self.kernel["GlobalSplitU"] == 1 or self.kernel["GlobalSplitU"] == -1) or self.kernel["StreamK"] > 0):
+      if self.ss.useE and not self.kernel["ProblemType"]["Gradient"]:
         vgprIdx   = self.ss.elementSumIdx[elementIdx] - self.parentWriter.states.c.startVgprValu
         vgprDst   = self.activationSetPCStruct.vgprActCopy if mergeActFuncCall else vgprIdx
         prefixStr = "" if mergeActFuncCall else "ValuC+"
@@ -2086,7 +2086,7 @@ class GlobalWriteBatchWriter:
       SaturateTypeInt8 = SaturateCastType.NORMAL
 
       gradientCvtModule = Module("gradientCvtModule")
-      if (self.kernel["ProblemType"]["UseE"] and self.kernel["ProblemType"]["Gradient"]) and ((self.kernel["GlobalSplitU"] == 1 or self.kernel["GlobalSplitU"] == -1) or self.kernel["StreamK"] > 0):
+      if self.ss.useE and self.kernel["ProblemType"]["Gradient"]:
         loadOffset = int((self.kernel["ProblemType"]["ComputeDataType"].numRegisters() - self.kernel["ProblemType"]["DataTypeE"].numRegisters()) * self.ss.cfg.gwvw)
         if activationCDataType != self.kernel["ProblemType"]["DataTypeE"]:
           if activationCDataType.isSingle() and self.kernel["ProblemType"]["DataTypeE"].isHalf():
@@ -2428,7 +2428,7 @@ class GlobalWriteBatchWriter:
             storeCodeModule.add(skipLabel)
           self.storesIssued += 1
 
-        if (self.kernel["ProblemType"]["UseE"] and not self.kernel["ProblemType"]["Gradient"]) and ((self.kernel["GlobalSplitU"] == 1 or self.kernel["GlobalSplitU"] == -1) or self.kernel["StreamK"] > 0):
+        if self.ss.useE and not self.kernel["ProblemType"]["Gradient"]:
           self.storesIssued += 1
         if self.storeBiasD == 1:
           self.storesIssued += 1
@@ -2448,7 +2448,7 @@ class GlobalWriteBatchWriter:
           module.add(tmpStoreCode)
 
           self.storesIssued += 1
-          if (self.kernel["ProblemType"]["UseE"] and not self.kernel["ProblemType"]["Gradient"]) and ((self.kernel["GlobalSplitU"] == 1 or self.kernel["GlobalSplitU"] == -1) or self.kernel["StreamK"] > 0):
+          if self.ss.useE and not self.kernel["ProblemType"]["Gradient"]:
             self.storesIssued += 1
           if self.storeBiasD == 1:
             self.storesIssued += 1
