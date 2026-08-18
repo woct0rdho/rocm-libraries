@@ -2296,7 +2296,6 @@ class StreamK(Component):
         else:
             WaveNum = kernel["NumThreads"] // kernel["WavefrontSize"]
 
-        storeCode = Module("Partials GroupLoadStore")
         for elementIdx in range(len(batchElements)):
             element = batchElements[elementIdx]
             addrCalc: AddrCalculation = ss.elementAddr[elementIdx]
@@ -2335,14 +2334,13 @@ class StreamK(Component):
             #             kStr += inst("v_pack_b32_f16", vgpr(d), vgpr("ValuC+%u"%(sumIdxV-1)), vgpr("ValuC+%u"%sumIdxV), "Pack with neighbor" )
 
             # if not kernel["StoreRemapVectorWidth"]:
+            # Workspace stores must stay next to their scalar-offset update. Unlike
+            # regular GroupLoadStore epilogues, every partial store reuses tmpS01 as
+            # its MUBUF soffset. Deferring the stores until after this loop makes all
+            # of them observe the final tmpS01 value and overwrite one workspace slot.
             tmpStoreCode = writer.addStore(kernel, ss, 'WS', addrCalc, sumIdx, tmpS01, edge, wsOffset=sgpr(tmpS01))
-            if kernel["GroupLoadStore"]:
-                storeCode.add(tmpStoreCode)
-            else:
-                module.add(tmpStoreCode)
+            module.add(tmpStoreCode)
             storesIssued += 1
-
-        module.add(storeCode)
 
         # return registers to pool:
         lastData = -1

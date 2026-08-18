@@ -135,6 +135,27 @@ Tests:
    function: matmul, transA: N, transB: N, M: 32, N: 32, K: 32, alpha: 1.0, beta: 0.0,
    batch_count: 2, initialization: norm_dist_one_special }
 
+# StreamK partial-workspace stores reuse a scalar offset. Under GroupLoadStore,
+# each offset update must remain paired with its store. This shape selects the
+# affected GLS1/SK3 solution through the default gfx1151 heuristic.
+- name: matmul_streamk_group_load_store_batched_smoke
+  category: smoke
+  function:
+    matmul: *hpa_bf16_precision
+  M: 512
+  N: 136
+  K: 32
+  transA: N
+  transB: T
+  alpha: 1.0
+  beta: 0.0
+  batch_count: 64
+  batch_mode: 0
+  initialization: rand_int
+  unit_check: 0
+  norm_check: 1
+  gpu_arch: '1151'
+
 - name: matmul_one
   category: quick
   function:
